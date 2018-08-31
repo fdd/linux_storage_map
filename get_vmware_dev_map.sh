@@ -47,9 +47,11 @@ main()
     local opt                  # getopts options container.
     local opt_show_help='0'    # flag for show_help().
     local opt_print_csv='0'    # flag for print_csv().
-    local opt_print_header='0' # flag for print_tabulated().
+    local opt_print_header='0' # flag for print_header().
+    local opt_print_tab='0'    # flag for print_tab().
+    local opt_print_header='0' # flag for print_header().
     local opt_get_asm_info='0' # flag for get_asm_info().
-    local opt_verbose='0'      # detailed output.
+    local opt_print_map='0'    # flag for print_scsi_host_mapping().
     local script_basename      # basename of the script file.
 
     return_code='0' # init to avoid unbond errors.
@@ -62,12 +64,14 @@ main()
     # prints only the real elapsed time, in a long format, 3-digit precision.
     TIMEFORMAT=$"$(echo -e "${c_yellow}")[stderr]$(echo -e "${c_off}") Execution time: %3lR"
 
-    while getopts ':hcav' opt; do # prepend the option-string w/ ':'.
+    while getopts ':hctvam' opt; do # prepend the option-string w/ ':'.
         case "$opt" in            # getopts is in silent mode.
             h) opt_show_help='1' ;;
             c) opt_print_csv='1' ;;
+            t) opt_print_tab='1' ;;
+            v) opt_print_header='1' ;;
             a) opt_get_asm_info='1' ;;
-            v) opt_verbose='1' ;;
+            m) opt_print_map='1' ;;
             \?)
                 echo_err "${script_basename}: invalid option -- '$OPTARG'"
                 echo_err "Try \`${script_basename} -h' for more information."
@@ -90,7 +94,7 @@ main()
     check_prerequisites # exit if prerequisites are not met.
 
     get_scsi_host_mapping # mandatory.
-    if [[ "$opt_verbose" = '1' ]]; then
+    if [[ "$opt_print_map" = '1' ]]; then
         print_scsi_host_mapping
     fi
 
@@ -103,6 +107,8 @@ main()
 
     if [[ "$opt_print_csv" = '1' ]]; then
         print_csv     # csv-only output.
+    elif [[ "$opt_print_tab" = '1' ]]; then
+        print_tab     # tabulated output.
     else
         print_devices # fully colored output.
     fi
@@ -125,8 +131,10 @@ show_help()
     echo 'Needs to be ran as root (required by scsi_id(8), for raw device access).'
     echo ''
     echo '  -c  print csv output only.'
+    echo '  -t  print tabulated output.'
+    echo '  -v  print header (column descriptions, verbose).'
     echo '  -a  print ASM info as well (DG membership, DG name, and size in Mb).'
-    echo '  -v  verbose output (prints IOport-PCI_addr and SCSI host mapping).'
+    echo '  -m  print IOport-PCI_addr and SCSI host mapping.'
     echo '  -h  print this help message and exit.'
     echo ''
     echo 'Send bug reports to: <ionut.jula@emerson.com>.'
@@ -446,16 +454,18 @@ get_asm_info()
     else
         echo_err "${c_yellow}[stderr]${c_off}"\
             "ASM is not running. ${c_red}[ FAILED ]${c_off}"
-        kfod_out=""
+        kfod_out=''
         return "$E_NO_ASM"
     fi
 
     # switch to the grid user and run kfod.
-    # this is a pretty time-consuming operation.
+    # this is can be a pretty time-consuming operation.
     kfod_out="$(su - grid -c "kfod disks=all s=t ds=t" \
         | awk '/:/{print $1","$5","$4","$6","$2$3}' \
         | sed 's:/dev/oracle/::; s/p1,/,/; s/://'
     )"
+    # kfod_out format:
+    # asm_number,asm_name,membership_status,disk_group,size_mb.
 
     #echo_err "$kfod_out"; echo_err # _DEBUG.
 }
@@ -495,6 +505,9 @@ return_device_info()
     for i in "${!scsi_host_map[@]}"; do
         if [[ "$device_host" = "${scsi_host_map[i]}" ]]; then
             device_host_vmware="$i"
+        else
+            # it could be an IDE device (like CDR), keep the host number.
+            device_host_vmware="$device_host"
         fi
     done
 
@@ -506,7 +519,8 @@ return_device_info()
     # skip the VMware IDE CDR.
     if [[ "$block_device_name" = "sr0" ]]; then
         #echo_err "CDR" # _DEBUG.
-        return "$SUCCESS"
+        #return "$SUCCESS"
+        true # _DEBUG.
     fi
 
     read -r device_vendor < /sys/class/scsi_device/"$device_hbtl"/device/vendor
@@ -514,7 +528,7 @@ return_device_info()
     device_vendor="$(trim_whitespace "$device_vendor")"
     device_model="$(trim_whitespace "$device_model")"
 
-    if [[ ! -z "$block_device_name" ]]; then
+    if [[ -n "$block_device_name" ]]; then
         echo "$hostname"
         echo "$device_hbtl"
         echo "SCSI(${device_host_vmware}:${device_target})"
@@ -523,11 +537,12 @@ return_device_info()
         echo "$sg_device_name"
         echo "$block_device_name"
         device_wwid="$("$scsi_id_path" -gud /dev/"$sg_device_name")"
-        if [[ ! -z "$device_wwid" ]]; then
+        if [[ -n "$device_wwid" ]]; then
             echo "$device_wwid"
         else
             # disk.enableUUID is undefined or set to "false" in the .vmx file.
-            echo 'NO_WWID'
+            device_wwid='NO_WWID'
+            echo "$device_wwid"
         fi
         # parse the udev_rules file (also handling duplicate slashes, if any).
         # extract the ASM device name (non-partitioned: w/o "p1").
@@ -537,29 +552,38 @@ return_device_info()
             | grep -o '/.*$' \
             | sed 's:[/"]::g; /p1$/d'
         )"
-        if [[ ! -z "$device_asm" ]]; then # an ASM device.
+        if [[ -n "$device_asm" ]]; then # an ASM device.
             echo "$device_asm"
             # asm_info requested via the `-a' option.
-            if [[ "$opt_get_asm_info" -eq "1" ]]; then
+            if [[ "$opt_get_asm_info" -eq '1' ]]; then
+                # fields selected: membership_status,disk_group,size_mb.
                 echo "$kfod_out" | grep "$device_asm" \
                     | awk -F',' '{print $3","$4","$5}'
             fi
         else # not an ASM device, maybe LVM.
             device_lvm="$(echo "$dmsetup_out" \
-                | sed "/(${block_device_name}[0-9]*/!d; 1q" \
-                | awk -F'-' '{print $1}'
+                | sed "/(${block_device_name}[0-9]*/!d" \
+                | sed 1q \
+                | awk -F'-' '{print $1}' # get the vg_name.
             )"
-            if [[ ! -z "$device_lvm" ]]; then # a LVM device.
+            if [[ -n "$device_lvm" ]]; then # a LVM device.
                 echo "$device_lvm"
             else # neither LVM, nor ASM, safe to call it a "NO_ASM" device.
-                echo 'NO_ASM'
+                device_lvm='NO_ASM'
+                echo "$device_lvm"
+            fi
+            # populate the rest of the 3 asm fields w/ placeholders.
+            if [[ "$opt_get_asm_info" -eq '1' ]]; then
+                echo 'NO_ASM'    # asm_name placeholder.
+                echo 'NO_ASM_DG' # asm_disk_group placeholder.
+                echo 'NO_ASM_SZ' # asm_size_mb placeholder.
             fi
         fi
         # get size of a block device, in sectors.
         # equivalent to a BLKGETSIZE ioctl request.
         # $(blockdev --getsize /dev/${block_device_name})
         read -r block_device_size < "/sys/block/${block_device_name}/size"
-        if [[ ! -z "$block_device_size" ]]; then
+        if [[ -n "$block_device_size" ]]; then
             #echo "$block_device_size" # _DEBUG.
             # sector_size: 512 bytes. size in bytes: 512 * number_of_sectors.
             # to be really pedantic, first send a BLKSSZGET ioctl request,
@@ -596,16 +620,43 @@ print_devices()
     for i in "${!device_list[@]}"; do
         echo -e "${c_yellow}Dev_${i}${c_off}"
         return_device_info "${device_list[i]}"
-        echo ""
+        echo ''
     done
 
     echo -e "${c_green}[Tip]${c_off}" "Use the \`-c' option for csv output."
+}
+
+# print_header: prints the header for csv and columnated output.
+print_header()
+{
+    declare header_line_1
+    declare header_line_2
+
+    if [[ "$opt_get_asm_info" = '1' ]]; then
+        header_line_1=('host,h:b:t:l,scsi(h:t),vendor,model,sg_dev,sd_dev,'
+            'wwid,lvm_or_asm,status,disk_gr,size_mb,size_gb,size_gib')
+        header_line_2=('----,-------,---------,------,-----,------,------,'
+            '----,----------,------,-------,-------,-------,--------')
+    else
+        header_line_1=('host,h:b:t:l,scsi(h:t),vendor,model,sg_dev,sd_dev,'
+            'wwid,lvm_or_asm,size_gb,size_gib')
+        header_line_2=('----,-------,---------,------,-----,------,------,'
+            '----,----------,-------,--------')
+    fi
+
+    IFS=''
+    echo "${header_line_1[*]}"
+    echo "${header_line_2[*]}"
 }
 
 # print_csv: prints csv-only output.
 print_csv()
 {
     declare -i i
+
+    if [[ "$opt_print_header" = '1' ]]; then
+        print_header
+    fi
 
     for i in "${!device_list[@]}"; do
         # echo -n "${device_list[i]}," # _DEBUG.
@@ -614,14 +665,10 @@ print_csv()
     done | sed 's/.$//; /^$/d' | sed n # buffered output (all text at once).
 }
 
-# print_tabulated: prints tabulated (columnated).
-print_tabulated()
+# print_tab: prints tabulated (columnated).
+print_tab()
 {
-    if [[ "$opt_print_header" = '1' ]]; then
-        { print_csv; } | column -s',' -t
-    else
-        { print_csv; } | column -s',' -t
-    fi
+    { print_csv; } | column -s',' -t
 }
 
 
