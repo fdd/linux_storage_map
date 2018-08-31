@@ -38,13 +38,13 @@ declare dmsetup_path   # location of dmsetup(8).
 main()
 {
     local -i return_code
-    local opt                        # getopts options container.
-    local opt_show_help='0'          # flag for show_help().
-    local opt_print_csv='0'          # flag for print_csv().
-    local opt_print_tabulated='0'    # flag for print_tabulated().
-    local opt_print_header='0'       # flag for print_header().
-    local opt_print_paths='0'        # flag for print_paths().
-    local script_basename            # basename of the script file.
+    local opt                  # getopts options container.
+    local opt_show_help='0'    # flag for show_help().
+    local opt_print_csv='0'    # flag for print_csv().
+    local opt_print_tab='0'    # flag for print_tab().
+    local opt_print_header='0' # flag for print_header().
+    local opt_print_paths='0'  # flag for print_paths().
+    local script_basename      # basename of the script file.
 
     return_code='0' # init to avoid unbond errors.
     #script_basename="$(basename -- "$0")" # basename of the script file.
@@ -60,7 +60,7 @@ main()
         case "$opt" in            # getopts is in silent mode.
             h) opt_show_help='1' ;;
             c) opt_print_csv='1' ;;
-            t) opt_print_tabulated='1' ;;
+            t) opt_print_tab='1' ;;
             v) opt_print_header='1' ;;
             p) opt_print_paths='1' ;;
             \?)
@@ -89,10 +89,10 @@ main()
         print_csv       # csv-only output.
     elif [[ "$opt_print_paths" = '1' ]]; then
         print_paths     # for each LUN, print the number of paths.
-    elif [[ "$opt_print_tabulated" = '1' ]]; then
-        print_tabulated # tabulated output.
+    elif [[ "$opt_print_tab" = '1' ]]; then
+        print_tab       # tabulated output.
     else
-        print_devices # fully colored output.
+        print_devices   # fully colored output.
     fi
 
     return_code="$?"
@@ -321,8 +321,11 @@ return_device_info()
     device_model="$(trim_whitespace "$device_model")"
 
     device_wwid="$("$scsi_id_path" -gud /dev/"$sg_device_name")"
+    if [[ -z "$device_wwid" ]]; then # handle the special SCSI devices,
+        device_wwid='NO_WWID'        # like virtual CDROMs.
+    fi
 
-    if [[ ! -z "$block_device_name" ]]; then
+    if [[ -n "$block_device_name" ]]; then
         echo "$hostname"
         echo "$device_hbtl"
         echo "$device_lun"
@@ -335,14 +338,17 @@ return_device_info()
             | tr '-' ' ' \
             | awk '{print $3}'
         )"
-        echo "$multipath_name"
+        if [[ -z "$multipath_name" ]]; then # LUNs w/ no associated m_path.
+            multipath_name='NO_MPATH'
+        fi
         echo "$device_wwid"
+        echo "$multipath_name"
 
         # get size of a block device, in sectors.
         # equivalent to a BLKGETSIZE ioctl request.
         # $(blockdev --getsize /dev/${block_device_name})
         read -r block_device_size < "/sys/block/${block_device_name}/size"
-        if [[ ! -z "$block_device_size" ]]; then
+        if [[ -n "$block_device_size" ]]; then
             #echo "$block_device_size" # _DEBUG.
             # sector_size: 512 bytes. size in bytes: 512 * number_of_sectors.
             # to be really pedantic, first send a BLKSSZGET ioctl request,
@@ -369,6 +375,7 @@ return_device_info()
         echo "$sg_device_name"
         echo 'NO_BLOCK_DEVICE'
         echo "$device_wwid"
+        echo 'NO_MPATH'
     fi
 }
 
@@ -380,7 +387,7 @@ print_devices()
     for i in "${!device_list[@]}"; do
         ( (echo -e "${c_yellow}Dev_${i}${c_off}"
             return_device_info "${device_list[i]}"
-            echo "") | sed n # buffered output (all text at once).
+            echo '') | sed n # buffered output (all text at once).
         ) | sed n &          # buffer together all compound outputs.
     done
     wait # wait for all the jobs to finish before going further.
@@ -388,22 +395,6 @@ print_devices()
     echo_err "${c_green}[ OK ]${c_off}" # _DEBUG.
 
     echo -e "${c_green}[Tip]${c_off}" "Use the \`-c' option for csv output."
-}
-
-# print_header: prints the header for csv and columnated output.
-print_header()
-{
-    declare header_line_1
-    declare header_line_2
-
-    header_line_1=('host,h:b:t:l,lun_id,vendor,model,sg_dev,sd_dev,multipath,'
-        'wwid,size_gb,size_gib')
-    header_line_2=('----,-------,------,------,-----,------,------,---------,'
-        '----,-------,--------')
-
-    IFS=''
-    echo "${header_line_1[*]}"
-    echo "${header_line_2[*]}"
 }
 
 # print_csv: prints csv-only output.
@@ -419,23 +410,33 @@ print_csv()
         # echo -n "${device_list[i]}," # _DEBUG.
         (return_device_info "${device_list[i]}" \
             | tr '\n' ','                    # convert to csv.
-            echo "") | sed 's/.$//; /^$/d' & # remove trailing comma.
+            echo '') | sed 's/.$//; /^$/d' & # remove trailing comma.
     done | sort -t',' -k2,2                  # sort by H:B:T:L address.
     wait # wait for all the jobs to finish before going further.
     echo_err -n "\\n${c_yellow}[stderr]${c_off} All subshells finished. "
     echo_err "${c_green}[ OK ]${c_off}" # _DEBUG.
 }
 
-# print_tabulated: prints tabulated (columnated).
-print_tabulated()
+# print_tab: prints tabulated (columnated).
+print_tab()
 {
-    if [[ "$opt_print_header" = '1' ]]; then
-        { #print_header;
-          print_csv;
-        } | column -s',' -t
-    else
-        { print_csv; } | column -s',' -t
-    fi
+    { print_csv; } | column -s',' -t
+}
+
+# print_header: prints the header for csv and columnated output.
+print_header()
+{
+    declare header_line_1
+    declare header_line_2
+
+    header_line_1=('host,h:b:t:l,lun,vendor,model,sg_dev,sd_dev,wwid,'
+        'multipath,size_gb,size_gib')
+    header_line_2=('----,-------,---,------,-----,------,------,----,'
+        '---------,-------,--------')
+
+    IFS=''
+    echo "${header_line_1[*]}"
+    echo "${header_line_2[*]}"
 }
 
 # print_paths: for each LUN, print the number of paths.
